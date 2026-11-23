@@ -1,6 +1,6 @@
 """Tourism Data Analysis and Visualization - single-page Streamlit dashboard.
 
-Historical layer : data/clean_tourism.csv (World Bank, 2010-2023)
+Historical layer : data/clean_tourism.csv (World Bank, 2010-2020)
 Live layer       : tourism.db -> live_signals (written by fetcher.py)
 
 With the default ``LIVE_MODE=db`` the dashboard only reads local files and never
@@ -319,7 +319,7 @@ def styled(fig: go.Figure, height: int = 380) -> go.Figure:
 # --------------------------------------------------------------------------- #
 st.title("🌍 Tourism Data Analysis and Visualization")
 st.markdown(
-    "Historical international tourism **2010–2023** (World Bank) alongside "
+    "Historical international tourism **2010–2020** (World Bank) alongside "
     "**live travel signals** for six cities, collected every 2 minutes."
 )
 
@@ -468,7 +468,7 @@ def metric_title() -> str:
 
 
 # 1. Global trend ------------------------------------------------------------
-st.subheader("1 · Global trend 2010–2023")
+st.subheader("1 · Global trend 2010–2020")
 trend = historical.groupby("year", as_index=False)[metric].sum(min_count=1).dropna()
 trend_fig = go.Figure()
 trend_fig.add_trace(
@@ -512,7 +512,7 @@ trend_fig.update_layout(
     yaxis_title=f"World {metric_title()}",
     hovermode="x unified",
 )
-trend_fig.update_xaxes(range=[2010, 2023], dtick=1)
+trend_fig.update_xaxes(range=[2010, 2020], dtick=1)
 st.plotly_chart(styled(trend_fig, 400), width="stretch")
 
 # 2. Choropleth --------------------------------------------------------------

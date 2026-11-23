@@ -99,5 +99,5 @@ def test_year_bounds_and_column_order() -> None:
     )
     cleaned = cleaning.clean_panel(pd.concat([df, extra], ignore_index=True))
     assert cleaned["year"].min() >= 2010
-    assert cleaned["year"].max() <= 2023
+    assert cleaned["year"].max() <= 2020
     assert list(cleaned.columns) == list(cleaning.COLUMNS)

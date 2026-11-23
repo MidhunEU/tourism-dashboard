@@ -3,7 +3,7 @@
 These pure pandas transformations are the rules used to build
 ``data/clean_tourism.csv`` (and are covered by ``tests/test_cleaning.py``):
 
-1. keep only 2010-2023;
+1. keep only 2010-2020 (the World Bank reports null for 2021 onward);
 2. drop World Bank aggregates (World, income groups, regions, Euro area, ...);
 3. drop rows where *both* indicators are missing;
 4. derive ``receipts_per_arrival`` and ``recovery_vs_2019``;
@@ -29,7 +29,7 @@ COLUMNS: tuple[str, ...] = (
 )
 
 BASE_YEAR: int = 2019
-DEFAULT_YEARS: tuple[int, int] = (2010, 2023)
+DEFAULT_YEARS: tuple[int, int] = (2010, 2020)
 
 # Aggregates present in the World Bank ``country/all`` feed. Real economies are
 # identified by having their own region label; aggregates carry "Aggregates".

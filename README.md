@@ -2,7 +2,7 @@
 
 <p align="center">
   A single-page Streamlit dashboard that pairs <strong>World Bank tourism data
-  (2010–2023)</strong> with <strong>live travel signals</strong> for Paris, London,
+  (2010–2020)</strong> with <strong>live travel signals</strong> for Paris, London,
   New York, Dubai, Singapore and Tokyo.
 </p>
 
@@ -23,7 +23,7 @@
 
 | Layer | Content | Source |
 |---|---|---|
-| **Historical** | International arrivals and receipts per country-year, 2010–2023 | World Bank `ST.INT.ARVL` / `ST.INT.RCPT.CD` → `data/clean_tourism.csv` |
+| **Historical** | International arrivals and receipts per country-year, 2010–2020 | World Bank `ST.INT.ARVL` / `ST.INT.RCPT.CD` → `data/clean_tourism.csv` |
 | **Live** | Aircraft in a ±0.5° box, temperature, precipitation, weather code and the USD→EUR rate for Paris, London, New York, Dubai, Singapore, Tokyo | OpenSky, Open-Meteo, Frankfurter → `tourism.db` (`live_signals`) |
 
 The **fetcher** collects one row per city every `FETCH_INTERVAL_SECONDS`
@@ -52,7 +52,7 @@ historical layer is the only place real reported tourist counts appear.
 ├── fetcher.py                    # collector loop → SQLite (retries, health, logging)
 ├── config.py                     # every setting, env-var overridable
 ├── cleaning.py                   # historical cleaning rules (covered by tests)
-├── data/clean_tourism.csv        # cleaned World Bank panel, 2010–2023 (committed)
+├── data/clean_tourism.csv        # cleaned World Bank panel, 2010–2020 (committed)
 ├── requirements.txt              # runtime dependencies, pinned
 ├── requirements-dev.txt          # + pytest and ruff
 ├── start.sh / stop.sh            # local Linux process control
@@ -265,10 +265,11 @@ historical charts and KPIs are unaffected.
    dashboard uses a timed fragment (`st.fragment(run_every=60)`) through the
    small `refresh_every()` decorator, degrading to a normal render on versions
    without fragments.
-3. **World Bank coverage gap.** In the current World Bank snapshot both
-   indicators return `null` for every economy for 2021–2023, so the panel spans
-   2010–2023 but only 2010–2020 carry values. Missing stays NaN — nothing is
-   imputed, and the trend chart keeps a fixed 2010–2023 axis.
+3. **Data ends at 2020.** The World Bank still returns `null` for both
+   indicators for every economy from 2021 onward, so those rows carry no data and
+   the cleaning rule (`cleaning.DEFAULT_YEARS`) keeps 2010–2020 only. Missing
+   values inside that window stay NaN — nothing is imputed — and the trend chart
+   keeps a fixed 2010–2020 axis.
 4. **Frankfurter has no AED.** The endpoint is called exactly as specified, but
    Frankfurter serves the ECB reference set (EUR/GBP/INR/JPY/SGD). Only the EUR
    rate is stored, so no column is missing.
@@ -293,8 +294,8 @@ historical charts and KPIs are unaffected.
 
 | API | Endpoint | Cadence |
 |---|---|---|
-| World Bank | `.../country/all/indicator/ST.INT.ARVL?format=json&date=2010:2023&per_page=20000` | one-off (CSV build) |
-| World Bank | `.../country/all/indicator/ST.INT.RCPT.CD?format=json&date=2010:2023&per_page=20000` | one-off (CSV build) |
+| World Bank | `.../country/all/indicator/ST.INT.ARVL?format=json&date=2010:2023&per_page=20000` | one-off (CSV build; 2021+ is null, kept years are 2010–2020) |
+| World Bank | `.../country/all/indicator/ST.INT.RCPT.CD?format=json&date=2010:2023&per_page=20000` | one-off (CSV build; 2021+ is null, kept years are 2010–2020) |
 | OpenSky Network | `https://opensky-network.org/api/states/all?lamin=…&lamax=…&lomin=…&lomax=…` | every loop, per city |
 | Open-Meteo | `https://api.open-meteo.com/v1/forecast?latitude=…&longitude=…&current=temperature_2m,precipitation,weather_code` | every loop, per city |
 | Frankfurter | `https://api.frankfurter.app/latest?from=USD&to=EUR,INR,JPY,GBP,SGD,AED` | once per loop |
