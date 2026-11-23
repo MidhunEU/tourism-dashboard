@@ -316,7 +316,7 @@ a **public GitHub repository** and no secrets.
    gets a `https://<name>.streamlit.app` address.
 
 **Set `LIVE_MODE=ondemand`** (the one setting the cloud needs). In
-*Settings → Secrets* add:
+*Settings → Secrets* add (the app copies secrets into the environment before `config.py` is read):
 
 ```toml
 LIVE_MODE = "ondemand"

@@ -48,7 +48,7 @@ def _apply_streamlit_secrets() -> None:
 
 _apply_streamlit_secrets()
 
-import config  # noqa: E402 - must follow the secrets bridge above
+import config
 
 ALL_CITIES = "All cities"
 CITY_POINTS = {
