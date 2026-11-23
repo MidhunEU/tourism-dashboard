@@ -12,6 +12,10 @@ enableXsrfProtection = true
 # No telemetry from a public deployment.
 gatherUsageStats = false
 
+[client]
+# Hide Streamlit's Deploy / hamburger toolbar: the dashboard is the product.
+toolbarMode = "minimal"
+
 [theme]
 # Same palette as the LIVE / STALE / OFFLINE pill in app.py.
 primaryColor = "#1b7f3b"
