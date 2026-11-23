@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+logs/
+tourism.db-wal
+tourism.db-shm
+.pytest_cache/
+.ruff_cache/
