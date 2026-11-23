@@ -3,13 +3,19 @@
 Historical layer : data/clean_tourism.csv (World Bank, 2010-2023)
 Live layer       : tourism.db -> live_signals (written by fetcher.py)
 
-The dashboard only reads local files; it never calls an upstream API. Every read
-is guarded, so a missing database or a broken CSV produces a warning instead of
-a traceback, and the historical charts always render.
+With the default ``LIVE_MODE=db`` the dashboard only reads local files and never
+calls an upstream API. With ``LIVE_MODE=ondemand`` (used on shared hosting, where
+no long-running collector exists) it collects one round itself when the stored row
+is older than ``LIVE_MAX_AGE_SECONDS``, reusing :mod:`fetcher`. Every read is
+guarded, so a missing database or a broken CSV produces a warning instead of a
+traceback, and the historical charts always render.
 
 Run:
     source .venv/bin/activate
     streamlit run app.py --server.port 8501
+
+Shared hosting:
+    LIVE_MODE=ondemand streamlit run app.py
 """
 
 from __future__ import annotations
@@ -120,6 +126,68 @@ def status_for(last_updated: pd.Timestamp | None) -> tuple[str, str]:
     return "OFFLINE", STATUS_COLOURS["OFFLINE"]
 
 
+def newest_live_timestamp(db_path: Path) -> pd.Timestamp | None:
+    """Newest stored live timestamp, read without loading the whole table."""
+    if not db_path.exists():
+        return None
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as conn:
+            row = conn.execute(
+                f"SELECT MAX(timestamp) FROM {config.TABLE_NAME}"
+            ).fetchone()
+    except (sqlite3.Error, pd.errors.DatabaseError):
+        return None
+    if not row or not row[0]:
+        return None
+    stamp = pd.to_datetime(row[0], utc=True, errors="coerce")
+    return None if pd.isna(stamp) else stamp
+
+
+@st.cache_data(ttl=config.ON_DEMAND_TTL, show_spinner=False)
+def collect_live_now() -> str | None:
+    """Collect one round of live signals inside the dashboard process.
+
+    Only used when ``LIVE_MODE=ondemand``. Returns ``None`` on success or a short
+error string. The result is cached for ``ON_DEMAND_TTL`` seconds, so every visitor
+within that window shares a single round of upstream calls instead of each page
+view hitting OpenSky.
+    """
+    import fetcher  # imported lazily: the default "db" mode never needs it
+
+    try:
+        session = fetcher.create_session()
+        conn = fetcher.connect()
+    except Exception as exc:  # noqa: BLE001 - surface the reason, never crash
+        return f"{type(exc).__name__}: {exc}"
+    try:
+        try:
+            eur_rate = fetcher.fetch_fx(session)
+        except Exception:  # noqa: BLE001 - FX is optional, reuse the stored rate
+            eur_rate = fetcher.last_eur_rate(conn)
+
+        batch: list[tuple[object, ...]] = []
+        for city in config.CITIES:
+            timestamp = fetcher.utc_now()
+            signals, _ok = fetcher.collect_city(session, conn, city)
+            batch.append(
+                (
+                    timestamp,
+                    city["city"],
+                    signals["planes_in_box"],
+                    signals["temp_c"],
+                    signals["precipitation"],
+                    signals["weather_code"],
+                    eur_rate,
+                )
+            )
+        fetcher.insert_rows(conn, batch)
+    except Exception as exc:  # noqa: BLE001 - the caller reports it as OFFLINE
+        return f"{type(exc).__name__}: {exc}"
+    finally:
+        conn.close()
+    return None
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_historical(path: str) -> pd.DataFrame:
     """Load and type the historical panel; cached for one hour."""
@@ -138,8 +206,18 @@ def load_live() -> tuple[pd.DataFrame, pd.Timestamp | None, str | None]:
     SQLite could not be read, so the caller can warn instead of crashing.
     """
     db_path = Path(config.DB_PATH)
+    fetch_error: str | None = None
+    if config.on_demand():
+        newest = newest_live_timestamp(db_path)
+        age = (
+            None
+            if newest is None
+            else (pd.Timestamp.now(tz="UTC") - newest).total_seconds()
+        )
+        if age is None or age > config.LIVE_MAX_AGE_SECONDS:
+            fetch_error = collect_live_now()
     if not db_path.exists():
-        return pd.DataFrame(), None, None
+        return pd.DataFrame(), None, fetch_error
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as conn:
             frame = pd.read_sql_query(f"SELECT * FROM {config.TABLE_NAME}", conn)
@@ -147,18 +225,18 @@ def load_live() -> tuple[pd.DataFrame, pd.Timestamp | None, str | None]:
         return pd.DataFrame(), None, f"{type(exc).__name__}: {exc}"
 
     if frame.empty:
-        return frame, None, None
+        return frame, None, fetch_error
 
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
     frame = frame.dropna(subset=["timestamp"])
     if frame.empty:
-        return frame, None, None
+        return frame, None, fetch_error
 
     latest = frame.sort_values("timestamp").groupby("city", as_index=False).tail(1)
     order = {city: index for index, city in enumerate(CITY_ORDER)}
     latest = latest.assign(_rank=latest["city"].map(order).fillna(len(order)))
     latest = latest.sort_values(["_rank", "city"]).drop(columns="_rank")
-    return latest.reset_index(drop=True), frame["timestamp"].max(), None
+    return latest.reset_index(drop=True), frame["timestamp"].max(), fetch_error
 
 
 def live_state() -> tuple[pd.DataFrame, pd.Timestamp | None, str | None]:

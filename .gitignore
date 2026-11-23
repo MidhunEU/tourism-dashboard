@@ -2,7 +2,10 @@
 __pycache__/
 *.pyc
 .env
+.streamlit/secrets.toml
 logs/
+# Local data: the live database is generated, never published.
+tourism.db
 tourism.db-wal
 tourism.db-shm
 .pytest_cache/

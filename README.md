@@ -72,6 +72,9 @@ streamlit run app.py --server.port 8501
 
 Open <http://localhost:8501>.
 
+To give other people a link that works while this machine is off, see
+[section 10](#10-public-link-streamlit-community-cloud).
+
 Or run both with the helper script (fetcher in the background with `nohup`,
 dashboard in the background, both logging to `logs/`):
 

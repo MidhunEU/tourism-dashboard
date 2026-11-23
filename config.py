@@ -99,6 +99,14 @@ LIVE_MAX_AGE_SECONDS: Final[int] = _env_int("LIVE_MAX_AGE_SECONDS", 300)
 STALE_MAX_AGE_SECONDS: Final[int] = _env_int("STALE_MAX_AGE_SECONDS", 1800)
 TABLE_NAME: Final[str] = "live_signals"
 
+# How the dashboard obtains live rows:
+#   "db"       - read only what fetcher.py stored (local, systemd, VPS)
+#   "ondemand" - collect a fresh round inside the dashboard when the stored row
+#                is older than LIVE_MAX_AGE_SECONDS (shared hosting, where no
+#                long-running collector exists)
+LIVE_MODE: Final[str] = _env_str("LIVE_MODE", "db").lower()
+ON_DEMAND_TTL: Final[int] = _env_int("ON_DEMAND_TTL", FETCH_INTERVAL_SECONDS)
+
 # --------------------------------------------------------------------------- #
 # Cities: exactly the six required by the brief. OpenSky box = lat/lon +/- 0.5.
 # --------------------------------------------------------------------------- #
@@ -121,3 +129,8 @@ def ensure_directories() -> None:
     """Create the folders the fetcher and dashboard write into."""
     resolve(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+
+
+def on_demand() -> bool:
+    """True when the dashboard collects live rows itself instead of reading."""
+    return LIVE_MODE == "ondemand"
