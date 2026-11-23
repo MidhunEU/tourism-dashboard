@@ -1,230 +1,297 @@
 # Tourism Data Analysis and Visualization
 
-A single-page, real-time tourism analytics dashboard for the *Data Analytics with
-Python* course project.
-
-It combines two layers:
-
-| Layer | Content | Source |
-|---|---|---|
-| **Historical** | International tourist arrivals and receipts, 2010–2023, by country | World Bank API → `data/clean_tourism.csv` |
-| **Live** | Aircraft count, temperature, precipitation, weather code and the USD→EUR rate for Paris, London, New York, Dubai, Singapore, Tokyo | OpenSky, Open-Meteo, Frankfurter → `tourism.db` (`live_signals`) |
-
-The fetcher refreshes the live layer every **120 seconds**; the dashboard
-re-reads it every **60 seconds**. If an API fails, the fetcher logs the error,
-keeps the last good value for that city, and the loop continues. The dashboard
-never depends on a live API call, so historical charts always load.
+A single-page Streamlit dashboard for the *Data Analytics with Python* course
+end project. It shows World Bank historical tourism data for 2010–2023 next to
+live travel signals for six cities, refreshed every two minutes.
 
 ---
 
-## 1. Run it on Linux
+## 1. What it does
+
+| Layer | Content | Source |
+|---|---|---|
+| **Historical** | International arrivals and receipts per country-year, 2010–2023 | World Bank `ST.INT.ARVL` / `ST.INT.RCPT.CD` → `data/clean_tourism.csv` |
+| **Live** | Aircraft in a ±0.5° box, temperature, precipitation, weather code and the USD→EUR rate for Paris, London, New York, Dubai, Singapore, Tokyo | OpenSky, Open-Meteo, Frankfurter → `tourism.db` (`live_signals`) |
+
+The **fetcher** collects one row per city every `FETCH_INTERVAL_SECONDS`
+(default 120 s). The **dashboard** re-reads SQLite every
+`DASHBOARD_REFRESH_SECONDS` (default 60 s) and never calls an upstream API
+itself, so the historical charts always render even when every API is down.
+
+Dashboard contents (single page, unchanged feature set):
+
+- a **LIVE / STALE / OFFLINE** status pill with the last fetch timestamp;
+- sidebar filters: **City** (All cities + 6), **Metric** (Arrivals / Receipts), **Year**;
+- three KPI cards for the selected year and scope;
+- six live city cards (planes, temperature, weather, rain, USD→EUR);
+- four Plotly charts: global trend, choropleth map, top-10 bars, arrivals-vs-receipts scatter.
+
+`planes_in_box` is **a proxy for air-traffic activity, not a tourist count**:
+it counts transponder states inside the box, including overflights, cargo and
+private traffic, and only aircraft visible to volunteer ADS-B receivers. The
+historical layer is the only place real reported tourist counts appear.
+
+### Project layout
+
+```
+.
+├── app.py                      # Streamlit dashboard (single page)
+├── fetcher.py                  # collector loop → SQLite (logging, retries, health)
+├── config.py                   # every setting, env-var overridable
+├── cleaning.py                 # historical cleaning rules (covered by tests)
+├── data/clean_tourism.csv      # cleaned World Bank panel, 2010–2023
+├── tourism.db                  # SQLite live_signals table (WAL mode)
+├── requirements.txt            # pinned environment (pip freeze)
+├── start.sh / stop.sh          # local Linux process control
+├── systemd/tourism-fetcher.service
+├── tests/                      # pytest suite
+├── logs/                       # app.log (rotating), fetcher.log, streamlit.log
+├── .env.example                # configuration template (copy to .env)
+└── README.md
+```
+
+---
+
+## 2. How to run locally
 
 ```bash
 cd <project-folder>
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt      # or: pip install streamlit pandas plotly requests
-```
+pip install -r requirements.txt
 
-Terminal 1 — collector (runs forever, one loop every 120 s):
+cp .env.example .env      # optional: change ports, paths, intervals, endpoints
 
-```bash
-source .venv/bin/activate
+# terminal 1 — collector (runs forever)
 python3 fetcher.py
-```
 
-Terminal 2 — dashboard:
-
-```bash
-source .venv/bin/activate
+# terminal 2 — dashboard
 streamlit run app.py --server.port 8501
 ```
 
-Then open <http://localhost:8501>.
+Open <http://localhost:8501>.
 
-Useful extra commands:
+Or run both with the helper script (fetcher in the background with `nohup`,
+dashboard in the background, both logging to `logs/`):
 
 ```bash
-python3 fetcher.py --loops 2                                   # two loops then stop
-sqlite3 tourism.db "SELECT COUNT(*) FROM live_signals;"         # row count
-sqlite3 tourism.db "SELECT * FROM live_signals ORDER BY timestamp DESC LIMIT 6;"
-python3 -m py_compile fetcher.py app.py                        # syntax check
+./start.sh          # starts fetcher + dashboard, waits for the health endpoint
+./stop.sh           # stops both (PID files, then pkill as a safety net)
+PORT=8600 ./start.sh
 ```
 
-## 2. Files
+Useful commands:
 
-```
-.
-├── PLAN.md                  # 1-page plan: architecture, APIs, schemas
-├── fetcher.py               # 120 s collection loop → SQLite
-├── app.py                   # Streamlit dashboard (one page)
-├── data/clean_tourism.csv   # cleaned World Bank panel, 2010–2023
-├── tourism.db               # SQLite live_signals table (created by fetcher.py)
-├── requirements.txt         # pip freeze of the environment
-└── README.md                # this file
+```bash
+python3 fetcher.py --loops 2        # two loops then exit (smoke test)
+python3 fetcher.py --health         # last fetch time + success/failure counters as JSON
+sqlite3 tourism.db "SELECT COUNT(*) FROM live_signals;"
+python3 -m py_compile fetcher.py app.py config.py cleaning.py
 ```
 
-## 3. APIs used (all free, no keys)
+### Configuration
 
-| API | Endpoint | What it gives us | Called |
-|---|---|---|---|
-| World Bank | `ST.INT.ARVL` — `.../country/all/indicator/ST.INT.ARVL?format=json&date=2010:2023&per_page=20000` | International tourist arrivals per country-year | Once, while building the CSV |
-| World Bank | `ST.INT.RCPT.CD` — `.../country/all/indicator/ST.INT.RCPT.CD?format=json&date=2010:2023&per_page=20000` | International tourism receipts, current US$ | Once, while building the CSV |
-| OpenSky Network | `https://opensky-network.org/api/states/all?lamin={lat-0.5}&lamax={lat+0.5}&lomin={lon-0.5}&lomax={lon+0.5}` | `len(states)` = `planes_in_box` | Every loop, per city |
-| Open-Meteo | `https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,precipitation,weather_code` | `temp_c`, `precipitation`, `weather_code` | Every loop, per city |
-| Frankfurter | `https://api.frankfurter.app/latest?from=USD&to=EUR,INR,JPY,GBP,SGD,AED` | USD→EUR rate (`eur_rate`) | Once per loop |
+All values live in `config.py` and are read from the environment (a local
+`.env` file is loaded when `python-dotenv` is installed; real environment
+variables win). See `.env.example`. Key settings:
 
-World Bank region labels come from the companion metadata endpoint
-`https://api.worldbank.org/v2/country/all?format=json&per_page=400`, used only
-when the CSV was built.
+| Variable | Default | Meaning |
+|---|---|---|
+| `FETCH_INTERVAL_SECONDS` | `120` | seconds between collection loops |
+| `REQUEST_TIMEOUT` | `10` | HTTP timeout for every request |
+| `RETRY_COUNT` | `3` | retries per request (backoff 2 s, 4 s, 8 s) |
+| `DB_PATH` | `tourism.db` | SQLite file |
+| `CSV_PATH` | `data/clean_tourism.csv` | historical panel |
+| `LOG_FILE` | `logs/app.log` | rotating log file (1 MB × 5) |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `OPENSKY_URL`, `OPENMETEO_URL`, `FRANKFURTER_URL` | see `.env.example` | upstream endpoints |
+| `DASHBOARD_REFRESH_SECONDS` | `60` | dashboard auto-refresh |
+| `LIVE_MAX_AGE_SECONDS` | `300` | LIVE → STALE threshold (5 min) |
+| `STALE_MAX_AGE_SECONDS` | `1800` | STALE → OFFLINE threshold (30 min) |
 
-No API keys, no accounts, no paid tiers.
+`.env` is git-ignored. No secrets or API keys are used anywhere in the project.
 
-## 4. Proxy vs real count — read this before quoting numbers
+---
 
-- `planes_in_box` is **the number of aircraft transponder states inside a
-  ±0.5° latitude/longitude box around the city**. It is a **proxy for air
-  traffic activity near that city**, not a count of tourists, not a count of
-  passengers, and not a count of arrivals at the city.
-- Aircraft in the box include overflights, cargo, private and military traffic.
-  A plane at cruise altitude on the way to another continent can be inside the
-  box. OpenSky also only sees aircraft that are broadcasting ADS-B and are
-  received by volunteer ground stations, so coverage is incomplete and differs
-  by region.
-- Likewise, `temp_c`, `precipitation` and `weather_code` describe **current
-  conditions**, not tourism demand. `eur_rate` is a single global exchange rate
-  (identical for all six cities in a loop), included for context.
-- The historical layer is a **real reported count**: World Bank arrivals are
-  internationally reported tourist arrivals per country-year, and receipts are
-  current US$ values. Use this layer for any quantitative claim about tourism
-  volume.
+## 3. How to run in production with systemd
 
-Only the historical layer supports statements like "country X received Y
-tourists". The live layer supports statements like "at 09:01 UTC there were 29
-aircraft in the Paris box and it was 3.1 °C".
+`systemd/tourism-fetcher.service` is a **user** unit. It uses `%h` (the user's
+home directory) rather than a hardcoded `/home/user`:
 
-## 5. Data model
+```ini
+[Unit]
+Description=Tourism live signal fetcher (OpenSky, Open-Meteo, Frankfurter)
+After=network-online.target
+Wants=network-online.target
 
-`tourism.db`:
-
-```sql
-CREATE TABLE live_signals (
-    timestamp      TEXT,     -- UTC ISO-8601, e.g. 2026-11-23T09:01:05Z
-    city           TEXT,     -- Paris | London | New York | Dubai | Singapore | Tokyo
-    planes_in_box  INTEGER,  -- len(states) from OpenSky
-    temp_c         REAL,
-    precipitation  REAL,     -- mm
-    weather_code   INTEGER,  -- WMO code
-    eur_rate       REAL      -- USD -> EUR
-);
+[Service]
+Type=simple
+WorkingDirectory=%h/<project-path>
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -c 'source %h/<project-path>/.venv/bin/activate && exec python3 fetcher.py'
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
 ```
 
-`data/clean_tourism.csv`:
+Install and start it:
 
-| Column | Meaning |
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/tourism-fetcher.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tourism-fetcher
+
+systemctl --user cat tourism-fetcher.service     # verify the installed unit
+systemctl --user status tourism-fetcher          # is it running?
+```
+
+The unit is written for this project's absolute path. If you move the folder,
+update `WorkingDirectory` and the `source` path in `ExecStart`, then
+`systemctl --user daemon-reload`.
+
+The dashboard is a normal long-running web server; run it with `start.sh`, or add
+a second unit whose `ExecStart` is
+`/bin/bash -c 'source .../bin/activate && exec streamlit run app.py --server.port 8501 --server.headless true'`.
+
+To keep the fetcher running after logout: `loginctl enable-linger "$USER"`.
+
+---
+
+## 4. How to check logs
+
+```bash
+# Under systemd (journal)
+journalctl --user -u tourism-fetcher -f          # follow live
+journalctl --user -u tourism-fetcher --since "10 min ago"
+journalctl --user -u tourism-fetcher -p warning  # warnings and errors only
+
+# Without systemd
+tail -f logs/app.log             # rotating log: timestamp, level, city, message
+tail -f logs/fetcher.log         # collector stdout/stderr from start.sh
+tail -f logs/streamlit.log       # dashboard output from start.sh
+
+# Is data actually arriving?
+python3 fetcher.py --health
+sqlite3 tourism.db "SELECT city, MAX(timestamp) FROM live_signals GROUP BY city;"
+```
+
+Every log line has the shape
+`2026-11-23T09:01:05+0000 INFO     [Paris] fetched at [2026-11-23T09:01:05Z]`
+(timestamp, level, city, message).
+
+---
+
+## 5. How to run tests
+
+```bash
+source .venv/bin/activate
+python -m pytest -q
+ruff check .
+```
+
+| Test file | Covers |
 |---|---|
-| `country` | World Bank economy name |
-| `region` | World Bank region label |
-| `year` | 2010–2023 |
-| `arrivals` | International tourist arrivals (NaN if not reported) |
-| `receipts` | International tourism receipts, current US$ (NaN if not reported) |
-| `receipts_per_arrival` | `receipts / arrivals` (NaN when either is missing or arrivals is 0) |
-| `recovery_vs_2019` | `arrivals / arrivals_2019 * 100` per country (NaN without a 2019 base) |
+| `tests/test_fetcher.py` | OpenSky parsing with 0/1/5 states, null and missing `states`, ±0.5° box params, retry on timeout (2 s/4 s backoff), give-up after 3 retries, 429/5xx retried but 4xx not, malformed/non-object JSON rejection, missing `current` → None values, missing `states` skips only the aircraft field, batch insert + `get_health`, WAL mode |
+| `tests/test_cleaning.py` | `receipts_per_arrival` (incl. zero arrivals → NaN), `recovery_vs_2019` (incl. missing 2019 base → NaN), aggregates dropped, NaN preserved (never zero-filled), both-missing rows dropped, year bounds and column order |
+| `tests/test_config.py` | defaults with no env vars, fixed city list and coordinates, env overrides, invalid numbers fall back to defaults |
 
-Cleaning rules applied when the CSV was built:
+The suite uses no network: every HTTP call is replaced by a fake session.
 
-1. Only real economies kept — the World Bank `country/all` feed's aggregates
-   (World, High income, Euro area, income groups, regional blocs) were dropped
-   by keeping economies with a 2-letter ISO code and a non-aggregate region.
-2. Only 2010–2023 kept.
-3. Rows where both indicators are missing were dropped; a single missing
-   indicator stays **NaN**, never 0.
+---
 
-## 6. Dashboard contents (single page)
+## 6. Failure modes and what happens
 
-- Header: *Live data last updated … UTC* from SQLite (`n/a` until the fetcher runs).
-- Sidebar filters: **City** (All cities + 6), **Metric** (Arrivals / Receipts),
-  **Year** (2010–2020, the years with reported values).
-- Three KPI cards for the selected year and scope: total arrivals, total
-  receipts, receipts per arrival.
-- Live section: six city cards with planes in box, temperature, weather,
-  precipitation and the USD→EUR rate, auto-refreshed every 60 s.
-- Four Plotly charts:
-  1. Global line chart of the selected metric, 2010–2023 axis (the focus
-     country's line is added on a secondary axis when a city is selected).
-  2. Choropleth map by country for the selected year (the selected city is
-     marked with a star).
-  3. Top 10 countries bar chart for the selected year (selected country
-     highlighted).
-  4. Arrivals vs receipts scatter (log–log) for the selected year, with the
-     selected country highlighted.
-- If `live_signals` is empty or the database is missing, the dashboard warns
-  **"Live data not yet fetched, run fetcher.py"** and still shows the historical
-  charts and KPIs.
+| Failure | Fetcher | Dashboard |
+|---|---|---|
+| OpenSky timeout / 5xx | retried after 2 s, 4 s, 8 s; if still failing the city keeps its last stored `planes_in_box` and a **warning** is logged | unchanged; pill shows LIVE/STALE from the last stored row |
+| OpenSky 429 (anonymous rate limit) | retried (429 is treated as retryable), then falls back to the last value | unchanged |
+| OpenSky returns JSON without `states` | warning `skipping planes for this city`, only the aircraft count is skipped; weather still collected | card shows the last known plane count or `n/a` |
+| Open-Meteo down or payload without `current` | weather fields are reused from the last row (or `None`); temperature/rain show `n/a` | card shows `n/a` for the affected fields |
+| Frankfurter down | last stored `eur_rate` reused | card shows the last rate |
+| OpenSky 4xx other than 429 | **not** retried; error logged, city falls back | unchanged |
+| Database locked / busy | WAL mode + 10 s busy timeout; insert retried by the next loop | read is `mode=ro`, so the dashboard never blocks the writer |
+| SQLite file missing or unreadable | fetcher creates it on start | warning `Live data unavailable, showing last cached data`, historical charts still render |
+| No rows yet | first loop inserts within seconds | pill **OFFLINE**, `Live data not yet fetched, run fetcher.py` |
+| Fetcher stopped for > 5 min / > 30 min | — | pill flips to **STALE** / **OFFLINE**; last-updated time shows the gap |
+| CSV missing or corrupt | — | error message naming the file; no traceback, no blank page |
 
-Changing the city filter changes the KPI scope, adds the focus-country trend
-line, marks the city on the map, highlights its bar and its scatter point.
-Changing the metric switches charts 1–3 between arrivals and receipts.
+The collector never exits because of an API failure: each city is collected in
+its own `try/except`, a failed loop still writes rows, and `Restart=always` in
+the unit covers crashes or reboots. A loop that fails entirely is logged and the
+next one starts `FETCH_INTERVAL_SECONDS` later.
 
-## 7. Assumptions and known limitations
+If OpenSky goes down during a demo: the fetcher keeps retrying and reuses the
+last aircraft counts (so cards stay populated with slightly stale numbers and
+the API calls are logged as warnings), the loop never stops, weather and FX keep
+updating, and the dashboard pill turns **STALE** after five minutes — the
+historical charts and KPIs are unaffected.
 
-1. **Python version.** The brief asks for Python 3.11, but this Linux machine
-   only has Python 3.12.3 installed (`/usr/bin/python3.12`, no `python3.11`).
-   The project uses `python3` from the venv, i.e. 3.12.3. All listed libraries
-   support 3.12; no 3.11-only syntax is used.
-2. **`st.autorefresh` does not exist in Streamlit 1.x.** The dashboard instead
-   uses Streamlit's built-in timed fragment (`st.fragment(run_every=60)`) via a
-   small `refresh_every(60)` decorator, which produces the same 60-second
-   auto-refresh without adding a third-party package. On a Streamlit version
-   without fragments the decorator degrades to a normal render.
-3. **World Bank coverage gap.** In the current World Bank snapshot (indicator
-   feed last modified 2026-11-11), `ST.INT.ARVL` and `ST.INT.RCPT.CD` return
-   `null` for every economy for 2021–2023. The panel is therefore built for
-   2010–2023 but only 2010–2020 carry values; 2021–2023 remain missing (NaN),
-   not zero, and are not shown as data points. The line chart keeps a fixed
-   2010–2023 x-axis. Nothing was imputed.
-   No synthetic fallback data was needed: the API responded successfully.
-4. **Frankfurter has no AED.** The endpoint is called exactly as specified
-   (`to=EUR,INR,JPY,GBP,SGD,AED`), but Frankfurter serves the ECB reference set,
-   which does not include AED, so the response contains EUR/GBP/INR/JPY/SGD only.
-   Only `eur_rate` is stored, so nothing is missing in the database.
-5. **OpenSky anonymous rate limit.** OpenSky limits anonymous clients, and the
-   dashboard's 6 requests every 2 minutes (4,320/day) can exceed the free
-   allowance, producing HTTP 429. The fetcher then logs the error and reuses the
-   city's last good `planes_in_box`, so rows keep arriving with a slightly stale
-   proxy value. Running the fetcher for short demo sessions is fine.
-6. **City → country mapping** used for the historical focus:
-   Paris→France, London→United Kingdom, New York→United States,
-   Dubai→United Arab Emirates, Singapore→Singapore, Tokyo→Japan.
-7. **Choropleth name matching.** Plotly matches World Bank names by country
-   name; a few long forms (for example `Congo, Dem. Rep.`) may not colour on the
-   map even though they are present in the data.
-8. **Time zone.** All live timestamps are stored and displayed in UTC.
-9. The CSV is a snapshot; it is not refreshed by the fetcher (rebuilding it
-   requires re-running the World Bank step described above).
+---
 
-## 8. Viva / defence answers
+## 7. Limitations
 
-**Why is `planes_in_box` a proxy?** Because OpenSky reports aircraft
-transponder positions, not people. The box count includes overflights, cargo,
-private and military aircraft, and only aircraft visible to volunteer ADS-B
-receivers; it also ignores tourists who arrive by train, car or ship. It is
-therefore a *signal of air-traffic intensity* near a city, correlated with
-travel activity, but it cannot be converted into a tourist count without
-assumptions.
+1. **Python version.** The brief asks for 3.11; this machine has 3.12.3 and no
+   `python3.11`. The code uses no version-specific syntax and all dependencies
+   support 3.12.
+2. **No `st.autorefresh`.** Streamlit 1.x has no `st.autorefresh`, so the
+   dashboard uses a timed fragment (`st.fragment(run_every=60)`) through the
+   small `refresh_every()` decorator, degrading to a normal render on versions
+   without fragments.
+3. **World Bank coverage gap.** In the current World Bank snapshot both
+   indicators return `null` for every economy for 2021–2023, so the panel spans
+   2010–2023 but only 2010–2020 carry values. Missing stays NaN — nothing is
+   imputed, and the trend chart keeps a fixed 2010–2023 axis.
+4. **Frankfurter has no AED.** The endpoint is called exactly as specified, but
+   Frankfurter serves the ECB reference set (EUR/GBP/INR/JPY/SGD). Only the EUR
+   rate is stored, so no column is missing.
+5. **OpenSky anonymous limits.** Six box queries every two minutes can exceed the
+   free allowance (HTTP 429). The retry/fallback path keeps rows flowing, but the
+   aircraft count may be a few minutes old.
+6. **`planes_in_box` is a proxy, not tourist arrivals.** See section 1.
+7. **City → country mapping** for the historical focus: Paris→France,
+   London→United Kingdom, New York→United States, Dubai→United Arab Emirates,
+   Singapore→Singapore, Tokyo→Japan.
+8. **Choropleth name matching.** Plotly matches World Bank names by country name,
+   so a few long forms (e.g. `Congo, Dem. Rep.`) may stay uncoloured.
+9. **Time zone.** All live timestamps are stored and displayed in UTC.
+10. **One writer, one reader.** SQLite is the right fit for a single fetcher and a
+    single dashboard; it is not a multi-node store.
+11. **The CSV is a snapshot** and is not rebuilt by the fetcher; the cleaning
+    rules live in `cleaning.py`.
 
-**Why 120 seconds?** It is a deliberate middle ground: OpenSky updates its state
-vectors roughly every 10–60 seconds and free anonymous access is rate-limited,
-so polling every 2 minutes keeps the dashboard near-live while staying inside
-courtesy limits and producing only 30 rows per hour per city (a manageable
-SQLite table). It is also coarser than the 60-second dashboard refresh, so the
-UI shows genuinely new data on every other refresh rather than re-reading the
-same row repeatedly.
+---
 
-**Why SQLite?** It is part of the Python standard library, requires no server,
-user or password, and stores the whole project's live history in one portable
-file (`tourism.db`). For a single-writer fetcher and a single-reader dashboard
-at this volume it is more than sufficient, and it can be queried directly from
-the shell (`sqlite3 tourism.db ...`) for verification, which keeps the project
+## 8. APIs used (all free, no keys)
+
+| API | Endpoint | Cadence |
+|---|---|---|
+| World Bank | `.../country/all/indicator/ST.INT.ARVL?format=json&date=2010:2023&per_page=20000` | one-off (CSV build) |
+| World Bank | `.../country/all/indicator/ST.INT.RCPT.CD?format=json&date=2010:2023&per_page=20000` | one-off (CSV build) |
+| OpenSky Network | `https://opensky-network.org/api/states/all?lamin=…&lamax=…&lomin=…&lomax=…` | every loop, per city |
+| Open-Meteo | `https://api.open-meteo.com/v1/forecast?latitude=…&longitude=…&current=temperature_2m,precipitation,weather_code` | every loop, per city |
+| Frankfurter | `https://api.frankfurter.app/latest?from=USD&to=EUR,INR,JPY,GBP,SGD,AED` | once per loop |
+
+---
+
+## 9. Viva / defence answers
+
+**Why is `planes_in_box` a proxy?** OpenSky reports aircraft transponder
+positions, not people. The box includes overflights, cargo, private and military
+aircraft, and only aircraft visible to volunteer ADS-B receivers; tourists
+arriving by train, car or ship are invisible. It signals air-traffic intensity,
+which correlates with travel activity, but it cannot be converted into a tourist
+count without assumptions.
+
+**Why 120 seconds?** OpenSky refreshes state vectors roughly every 10–60 s and
+anonymous access is rate-limited, so two minutes is near-live while staying
+inside courtesy limits and producing 30 rows per hour per city. It is also
+coarser than the 60 s dashboard refresh, so the UI shows genuinely new data
+rather than re-reading the same row.
+
+**Why SQLite?** It is in the Python standard library, needs no server, user or
+password, and keeps the live history in one portable file. One writer and one
+reader at this volume is exactly what SQLite handles best, and the file can be
+inspected from the shell (`sqlite3 tourism.db …`), which keeps the project
 reproducible on any Linux machine without extra infrastructure.

@@ -3,6 +3,10 @@
 Historical layer : data/clean_tourism.csv (World Bank, 2010-2023)
 Live layer       : tourism.db -> live_signals (written by fetcher.py)
 
+The dashboard only reads local files; it never calls an upstream API. Every read
+is guarded, so a missing database or a broken CSV produces a warning instead of
+a traceback, and the historical charts always render.
+
 Run:
     source .venv/bin/activate
     streamlit run app.py --server.port 8501
@@ -10,38 +14,57 @@ Run:
 
 from __future__ import annotations
 
-import os
 import sqlite3
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-CSV_PATH = "data/clean_tourism.csv"
-DB_PATH = "tourism.db"
-REFRESH_SECONDS = 60
+import config
 
-CITY_POINTS = {
-    "Paris": {"country": "France", "lat": 48.85, "lon": 2.35},
-    "London": {"country": "United Kingdom", "lat": 51.50, "lon": -0.12},
-    "New York": {"country": "United States", "lat": 40.71, "lon": -74.00},
-    "Dubai": {"country": "United Arab Emirates", "lat": 25.20, "lon": 55.27},
-    "Singapore": {"country": "Singapore", "lat": 1.35, "lon": 103.82},
-    "Tokyo": {"country": "Japan", "lat": 35.68, "lon": 139.69},
-}
-CITY_ORDER = list(CITY_POINTS)
 ALL_CITIES = "All cities"
+CITY_POINTS = {
+    city["city"]: {
+        "country": city["country"],
+        "lat": city["lat"],
+        "lon": city["lon"],
+    }
+    for city in config.CITIES
+}
+CITY_ORDER = list(config.CITY_ORDER)
 
 WEATHER_CODES = {
-    0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
-    45: "Fog", 48: "Rime fog", 51: "Light drizzle", 53: "Drizzle",
-    55: "Dense drizzle", 61: "Light rain", 63: "Rain", 65: "Heavy rain",
-    66: "Freezing rain", 67: "Freezing rain", 71: "Light snow", 73: "Snow",
-    75: "Heavy snow", 77: "Snow grains", 80: "Light showers", 81: "Showers",
-    82: "Violent showers", 85: "Snow showers", 86: "Snow showers",
-    95: "Thunderstorm", 96: "Thunderstorm + hail", 99: "Thunderstorm + hail",
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Rime fog",
+    51: "Light drizzle",
+    53: "Drizzle",
+    55: "Dense drizzle",
+    61: "Light rain",
+    63: "Rain",
+    65: "Heavy rain",
+    66: "Freezing rain",
+    67: "Freezing rain",
+    71: "Light snow",
+    73: "Snow",
+    75: "Heavy snow",
+    77: "Snow grains",
+    80: "Light showers",
+    81: "Showers",
+    82: "Violent showers",
+    85: "Snow showers",
+    86: "Snow showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm + hail",
+    99: "Thunderstorm + hail",
 }
+
+STATUS_COLOURS = {"LIVE": "#1b7f3b", "STALE": "#b25e09", "OFFLINE": "#b3261e"}
 
 st.set_page_config(
     page_title="Tourism Data Analysis and Visualization",
@@ -54,19 +77,24 @@ st.set_page_config(
 # Helpers
 # --------------------------------------------------------------------------- #
 def refresh_every(seconds: int):
-    """st.autorefresh does not exist in Streamlit 1.x; use a timed fragment.
+    """Timed auto-refresh without a third-party package.
 
-    Falls back to a normal function on versions without st.fragment.
+    ``st.autorefresh`` does not exist in Streamlit 1.x, so the view is wrapped in
+    a timed fragment. On a version without fragments the decorator degrades to a
+    normal render.
     """
+
     def decorator(func):
         fragment = getattr(st, "fragment", None) or getattr(
             st, "experimental_fragment", None
         )
         return fragment(run_every=seconds)(func) if fragment else func
+
     return decorator
 
 
 def humanize(value: float | None) -> str:
+    """Format a large number as K/M/B, or n/a."""
     if value is None or pd.isna(value):
         return "n/a"
     value = float(value)
@@ -76,8 +104,25 @@ def humanize(value: float | None) -> str:
     return f"{value:,.0f}"
 
 
-@st.cache_data(show_spinner=False)
+def status_for(last_updated: pd.Timestamp | None) -> tuple[str, str]:
+    """Return ``(LIVE|STALE|OFFLINE, colour)`` for the freshness pill.
+
+    LIVE under 5 minutes, STALE between 5 and 30 minutes, OFFLINE beyond that or
+    when no live row exists at all.
+    """
+    if last_updated is None:
+        return "OFFLINE", STATUS_COLOURS["OFFLINE"]
+    age = (pd.Timestamp.now(tz="UTC") - last_updated).total_seconds()
+    if age <= config.LIVE_MAX_AGE_SECONDS:
+        return "LIVE", STATUS_COLOURS["LIVE"]
+    if age <= config.STALE_MAX_AGE_SECONDS:
+        return "STALE", STATUS_COLOURS["STALE"]
+    return "OFFLINE", STATUS_COLOURS["OFFLINE"]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_historical(path: str) -> pd.DataFrame:
+    """Load and type the historical panel; cached for one hour."""
     df = pd.read_csv(path)
     df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
     for col in ("arrivals", "receipts", "receipts_per_arrival", "recovery_vs_2019"):
@@ -85,39 +130,118 @@ def load_historical(path: str) -> pd.DataFrame:
     return df
 
 
-def load_live() -> tuple[pd.DataFrame, pd.Timestamp | None]:
-    """Latest row per city. Empty frame (and None) when no live data exists."""
-    if not os.path.exists(DB_PATH):
-        return pd.DataFrame(), None
+@st.cache_data(ttl=config.DASHBOARD_REFRESH_SECONDS, show_spinner=False)
+def load_live() -> tuple[pd.DataFrame, pd.Timestamp | None, str | None]:
+    """Read the latest row per city.
+
+    Returns ``(frame, last_timestamp, error)``. ``error`` is a short string when
+    SQLite could not be read, so the caller can warn instead of crashing.
+    """
+    db_path = Path(config.DB_PATH)
+    if not db_path.exists():
+        return pd.DataFrame(), None, None
     try:
-        with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5) as conn:
-            frame = pd.read_sql_query("SELECT * FROM live_signals", conn)
-    except (sqlite3.Error, pd.errors.DatabaseError):
-        return pd.DataFrame(), None
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as conn:
+            frame = pd.read_sql_query(f"SELECT * FROM {config.TABLE_NAME}", conn)
+    except (sqlite3.Error, pd.errors.DatabaseError) as exc:
+        return pd.DataFrame(), None, f"{type(exc).__name__}: {exc}"
 
     if frame.empty:
-        return frame, None
+        return frame, None, None
 
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
     frame = frame.dropna(subset=["timestamp"])
     if frame.empty:
-        return frame, None
+        return frame, None, None
 
     latest = frame.sort_values("timestamp").groupby("city", as_index=False).tail(1)
-    latest = latest.sort_values(
-        "city", key=lambda s: s.map({c: i for i, c in enumerate(CITY_ORDER)})
+    order = {city: index for index, city in enumerate(CITY_ORDER)}
+    latest = latest.assign(_rank=latest["city"].map(order).fillna(len(order)))
+    latest = latest.sort_values(["_rank", "city"]).drop(columns="_rank")
+    return latest.reset_index(drop=True), frame["timestamp"].max(), None
+
+
+def live_state() -> tuple[pd.DataFrame, pd.Timestamp | None, str | None]:
+    """Cached live read with a session-level fallback to the last good frame."""
+    frame, last_updated, error = load_live()
+    if error is None:
+        st.session_state["live_backup"] = (frame, last_updated)
+        return frame, last_updated, None
+
+    backup_frame, backup_updated = st.session_state.get(
+        "live_backup", (pd.DataFrame(), None)
     )
-    return latest, frame["timestamp"].max()
+    return backup_frame, backup_updated, error
+
+
+def render_status() -> None:
+    """Render the LIVE / STALE / OFFLINE pill plus the last-updated time."""
+    _frame, last_updated, error = live_state()
+    label, colour = status_for(last_updated)
+    if last_updated is None:
+        detail = f"no live rows yet - start fetcher.py (refreshes every {config.DASHBOARD_REFRESH_SECONDS} s)"
+    else:
+        detail = (
+            f"{last_updated.tz_convert('UTC').strftime('%Y-%m-%d %H:%M:%S')} UTC "
+            f"(refreshes every {config.DASHBOARD_REFRESH_SECONDS} s)"
+        )
+    st.markdown(
+        '<div style="display:flex;align-items:center;gap:.6rem;margin:0 0 .7rem 0">'
+        f'<span style="background:{colour};color:#fff;border-radius:999px;'
+        "padding:.15rem .65rem;font-size:.78rem;font-weight:700;"
+        f'letter-spacing:.05em">{label}</span>'
+        f'<span style="color:#555;font-size:.85rem">Live data last updated: {detail}</span>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    if error:
+        st.warning("Live data unavailable, showing last cached data")
 
 
 def styled(fig: go.Figure, height: int = 380) -> go.Figure:
+    """Apply the shared chart layout."""
     fig.update_layout(
         height=height,
-        margin=dict(l=10, r=10, t=50, b=10),
+        margin={"l": 10, "r": 10, "t": 50, "b": 10},
         template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
     )
     return fig
+
+
+# --------------------------------------------------------------------------- #
+# Header
+# --------------------------------------------------------------------------- #
+st.title("🌍 Tourism Data Analysis and Visualization")
+st.markdown(
+    "Historical international tourism **2010–2023** (World Bank) alongside "
+    "**live travel signals** for six cities, collected every 2 minutes."
+)
+
+
+@refresh_every(config.DASHBOARD_REFRESH_SECONDS)
+def render_header_status() -> None:
+    """Auto-refreshing status pill."""
+    render_status()
+
+
+render_header_status()
+
+try:
+    historical = load_historical(config.CSV_PATH)
+except (OSError, ValueError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
+    st.error(
+        f"Historical dataset could not be loaded from `{config.CSV_PATH}`: {exc}. "
+        "Restore data/clean_tourism.csv to see the charts."
+    )
+    st.stop()
+
+if historical.empty:
+    st.error(
+        f"Historical dataset `{config.CSV_PATH}` contains no rows. "
+        "Restore the file to see the charts."
+    )
+    st.stop()
 
 
 # --------------------------------------------------------------------------- #
@@ -128,11 +252,8 @@ city_choice = st.sidebar.selectbox("City", [ALL_CITIES] + CITY_ORDER)
 metric_label = st.sidebar.selectbox("Metric", ["Arrivals", "Receipts"])
 metric = "arrivals" if metric_label == "Arrivals" else "receipts"
 
-historical = load_historical(CSV_PATH)
 years = sorted(int(y) for y in historical["year"].dropna().unique())
-selected_year = st.sidebar.selectbox(
-    "Year", years, index=len(years) - 1
-)
+selected_year = st.sidebar.selectbox("Year", years, index=len(years) - 1)
 
 focus_city = None if city_choice == ALL_CITIES else city_choice
 focus_country = CITY_POINTS[focus_city]["country"] if focus_city else None
@@ -140,33 +261,10 @@ scope_label = focus_country if focus_country else "All countries"
 
 
 # --------------------------------------------------------------------------- #
-# Header (auto-refreshing last_updated)
-# --------------------------------------------------------------------------- #
-@refresh_every(REFRESH_SECONDS)
-def render_last_updated() -> None:
-    _, last_updated = load_live()
-    if last_updated is None:
-        st.caption("Live data: not yet fetched")
-    else:
-        st.caption(
-            "Live data last updated: "
-            f"{last_updated.tz_convert('UTC').strftime('%Y-%m-%d %H:%M:%S')} UTC "
-            f"(refreshes every {REFRESH_SECONDS} s)"
-        )
-
-
-st.title("🌍 Tourism Data Analysis and Visualization")
-st.markdown(
-    "Historical international tourism **2010–2023** (World Bank) alongside "
-    "**live travel signals** for six cities, collected every 2 minutes."
-)
-render_last_updated()
-
-
-# --------------------------------------------------------------------------- #
 # KPI cards
 # --------------------------------------------------------------------------- #
 def kpi_values() -> tuple[float, float, float]:
+    """Totals for the selected year and scope."""
     year_df = historical[historical["year"] == selected_year]
     if focus_country:
         year_df = year_df[year_df["country"] == focus_country]
@@ -176,7 +274,9 @@ def kpi_values() -> tuple[float, float, float]:
                 year_df = base[base["year"] == base["year"].max()]
     arrivals = year_df["arrivals"].sum(min_count=1)
     receipts = year_df["receipts"].sum(min_count=1)
-    per_arrival = receipts / arrivals if pd.notna(arrivals) and arrivals else float("nan")
+    per_arrival = (
+        receipts / arrivals if pd.notna(arrivals) and arrivals else float("nan")
+    )
     return arrivals, receipts, per_arrival
 
 
@@ -185,7 +285,10 @@ st.markdown(f"#### {selected_year} snapshot — {scope_label}")
 k1, k2, k3 = st.columns(3)
 k1.metric(f"Total arrivals ({selected_year})", humanize(arrivals_total))
 k2.metric(f"Total receipts ({selected_year})", f"US$ {humanize(receipts_total)}")
-k3.metric("Receipts per arrival", f"US$ {per_arrival:,.0f}" if pd.notna(per_arrival) else "n/a")
+k3.metric(
+    "Receipts per arrival",
+    f"US$ {per_arrival:,.0f}" if pd.notna(per_arrival) else "n/a",
+)
 st.caption(
     "Receipts are World Bank current US$. When a city is selected, the historical "
     "figures describe its country; otherwise they cover all reporting economies."
@@ -197,10 +300,13 @@ st.divider()
 # --------------------------------------------------------------------------- #
 # Live section
 # --------------------------------------------------------------------------- #
-@refresh_every(REFRESH_SECONDS)
+@refresh_every(config.DASHBOARD_REFRESH_SECONDS)
 def render_live() -> None:
-    live, _ = load_live()
+    """Six auto-refreshing city cards, with explicit empty/error states."""
+    live, _, error = live_state()
     st.subheader("Live travel signals")
+    if error:
+        st.warning("Live data unavailable, showing last cached data")
     if live.empty:
         st.warning("Live data not yet fetched, run fetcher.py")
         return
@@ -208,26 +314,33 @@ def render_live() -> None:
     rows = live.set_index("city")
     for start in range(0, len(CITY_ORDER), 3):
         cols = st.columns(3)
-        for col, city in zip(cols, CITY_ORDER[start:start + 3]):
-            with col:
+        for col, city in zip(cols, CITY_ORDER[start : start + 3]):
+            with col, st.container(border=True):
+                st.markdown(f"**{city}**")
                 if city not in rows.index:
-                    st.info(f"{city}: no live row yet")
+                    st.info("No live data yet, start fetcher.py")
                     continue
                 row = rows.loc[city]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[-1]
                 code = row.get("weather_code")
-                weather = WEATHER_CODES.get(int(code), "Unknown") if pd.notna(code) else "n/a"
-                with st.container(border=True):
-                    st.markdown(f"**{city}**")
-                    left, right = st.columns(2)
-                    left.metric(
-                        "Planes in box",
-                        "n/a" if pd.isna(row.get("planes_in_box")) else f"{int(row['planes_in_box'])}",
-                    )
-                    right.metric(
-                        "Temp",
-                        "n/a" if pd.isna(row.get("temp_c")) else f"{row['temp_c']:.1f} °C",
-                    )
-                    st.caption(f"{weather} · rain {row.get('precipitation', 0):.1f} mm")
+                weather = (
+                    WEATHER_CODES.get(int(code), "Unknown") if pd.notna(code) else "n/a"
+                )
+                left, right = st.columns(2)
+                left.metric(
+                    "Planes in box",
+                    "n/a"
+                    if pd.isna(row.get("planes_in_box"))
+                    else f"{int(row['planes_in_box'])}",
+                )
+                right.metric(
+                    "Temp",
+                    "n/a" if pd.isna(row.get("temp_c")) else f"{row['temp_c']:.1f} °C",
+                )
+                rain = row.get("precipitation")
+                rain_text = f"{rain:.1f} mm" if pd.notna(rain) else "n/a"
+                st.caption(f"{weather} · rain {rain_text}")
                 eur = row.get("eur_rate")
                 if pd.notna(eur):
                     st.caption(f"1 USD = {eur:.4f} EUR")
@@ -245,16 +358,8 @@ st.divider()
 # Charts
 # --------------------------------------------------------------------------- #
 def metric_title() -> str:
+    """Human label for the selected metric."""
     return "arrivals" if metric == "arrivals" else "receipts (US$)"
-
-
-def focus_row() -> pd.Series | None:
-    if not focus_country:
-        return None
-    year_df = historical[
-        (historical["year"] == selected_year) & (historical["country"] == focus_country)
-    ]
-    return None if year_df.empty else year_df.iloc[0]
 
 
 # 1. Global trend ------------------------------------------------------------
@@ -267,7 +372,7 @@ trend_fig.add_trace(
         y=trend[metric],
         mode="lines+markers",
         name="World total",
-        line=dict(color="#1f77b4", width=3),
+        line={"color": "#1f77b4", "width": 3},
         fill="tozeroy",
         fillcolor="rgba(31,119,180,0.12)",
     )
@@ -275,7 +380,9 @@ trend_fig.add_trace(
 if focus_country:
     focus_trend = (
         historical[historical["country"] == focus_country]
-        .groupby("year", as_index=False)[metric].sum(min_count=1).dropna()
+        .groupby("year", as_index=False)[metric]
+        .sum(min_count=1)
+        .dropna()
     )
     trend_fig.add_trace(
         go.Scatter(
@@ -283,17 +390,17 @@ if focus_country:
             y=focus_trend[metric],
             mode="lines+markers",
             name=focus_country,
-            line=dict(color="#d62728", width=2, dash="dot"),
+            line={"color": "#d62728", "width": 2, "dash": "dot"},
             yaxis="y2",
         )
     )
     trend_fig.update_layout(
-        yaxis2=dict(
-            title=f"{focus_country} {metric_title()}",
-            overlaying="y",
-            side="right",
-            showgrid=False,
-        )
+        yaxis2={
+            "title": f"{focus_country} {metric_title()}",
+            "overlaying": "y",
+            "side": "right",
+            "showgrid": False,
+        }
     )
 trend_fig.update_layout(
     xaxis_title="Year",
@@ -326,13 +433,17 @@ else:
             text=[focus_city],
             mode="markers+text",
             textposition="top center",
-            marker=dict(size=14, color="#d62728", symbol="star"),
+            marker={"size": 14, "color": "#d62728", "symbol": "star"},
             name=focus_city,
             showlegend=False,
         )
     map_fig.update_layout(
-        geo=dict(showframe=False, showcoastlines=False, projection_type="natural earth"),
-        coloraxis_colorbar=dict(title=metric_label),
+        geo={
+            "showframe": False,
+            "showcoastlines": False,
+            "projection_type": "natural earth",
+        },
+        coloraxis_colorbar={"title": metric_label},
     )
     st.plotly_chart(styled(map_fig, 460), width="stretch")
 
@@ -372,7 +483,9 @@ st.subheader(f"4 · Arrivals vs receipts in {selected_year}")
 scatter_data = historical[historical["year"] == selected_year].dropna(
     subset=["arrivals", "receipts"]
 )
-scatter_data = scatter_data[(scatter_data["arrivals"] > 0) & (scatter_data["receipts"] > 0)]
+scatter_data = scatter_data[
+    (scatter_data["arrivals"] > 0) & (scatter_data["receipts"] > 0)
+]
 if scatter_data.empty:
     st.info(f"Not enough paired arrivals/receipts data for {selected_year}.")
 else:
@@ -401,7 +514,7 @@ else:
                     mode="markers+text",
                     text=point["country"],
                     textposition="top center",
-                    marker=dict(size=16, color="#d62728", symbol="star"),
+                    marker={"size": 16, "color": "#d62728", "symbol": "star"},
                     name="Selected",
                     showlegend=True,
                 )

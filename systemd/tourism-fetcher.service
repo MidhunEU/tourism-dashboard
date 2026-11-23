@@ -1,0 +1,21 @@
+[Unit]
+Description=Tourism live signal fetcher (OpenSky, Open-Meteo, Frankfurter)
+Documentation=file:%h/.config/freebuff-desktop/local-projects/03133676-4fc1-49e1-a7b1-bc3cca0c81a3/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.config/freebuff-desktop/local-projects/03133676-4fc1-49e1-a7b1-bc3cca0c81a3
+Environment=PYTHONUNBUFFERED=1
+Environment=LOG_LEVEL=INFO
+ExecStart=/bin/bash -c 'source %h/.config/freebuff-desktop/local-projects/03133676-4fc1-49e1-a7b1-bc3cca0c81a3/.venv/bin/activate && exec python3 fetcher.py'
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
