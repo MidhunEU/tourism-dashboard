@@ -20,6 +20,7 @@ Shared hosting:
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -28,7 +29,26 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-import config
+
+def _apply_streamlit_secrets() -> None:
+    """Expose ``st.secrets`` entries as environment variables.
+
+    Shared hosting (Streamlit Community Cloud) configures an app through a
+    Secrets field rather than a shell, while :mod:`config` reads the environment.
+    Bridging the two keeps ``LIVE_MODE`` and friends settable in one place without
+    duplicating the settings logic.
+    """
+    try:
+        secrets = dict(st.secrets)
+    except Exception:  # noqa: BLE001 - no secrets configured, use the environment
+        return
+    for key, value in secrets.items():
+        os.environ.setdefault(str(key).upper(), str(value))
+
+
+_apply_streamlit_secrets()
+
+import config  # noqa: E402 - must follow the secrets bridge above
 
 ALL_CITIES = "All cities"
 CITY_POINTS = {
@@ -148,9 +168,9 @@ def collect_live_now() -> str | None:
     """Collect one round of live signals inside the dashboard process.
 
     Only used when ``LIVE_MODE=ondemand``. Returns ``None`` on success or a short
-error string. The result is cached for ``ON_DEMAND_TTL`` seconds, so every visitor
-within that window shares a single round of upstream calls instead of each page
-view hitting OpenSky.
+    error string. The result is cached for ``ON_DEMAND_TTL`` seconds, so every
+    visitor within that window shares a single round of upstream calls instead
+    of each page view hitting OpenSky.
     """
     import fetcher  # imported lazily: the default "db" mode never needs it
 
@@ -166,9 +186,11 @@ view hitting OpenSky.
             eur_rate = fetcher.last_eur_rate(conn)
 
         batch: list[tuple[object, ...]] = []
+        collected = 0
         for city in config.CITIES:
             timestamp = fetcher.utc_now()
-            signals, _ok = fetcher.collect_city(session, conn, city)
+            signals, ok = fetcher.collect_city(session, conn, city)
+            collected += int(ok)
             batch.append(
                 (
                     timestamp,
@@ -180,7 +202,12 @@ view hitting OpenSky.
                     eur_rate,
                 )
             )
-        fetcher.insert_rows(conn, batch)
+        if collected:
+            fetcher.insert_rows(conn, batch)
+        else:
+            # Every upstream call failed: no row is written, so the pill stays
+            # OFFLINE instead of claiming fresh data made entirely of nulls.
+            return "every upstream API failed; no live row stored"
     except Exception as exc:  # noqa: BLE001 - the caller reports it as OFFLINE
         return f"{type(exc).__name__}: {exc}"
     finally:

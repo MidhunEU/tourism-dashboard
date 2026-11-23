@@ -298,3 +298,52 @@ password, and keeps the live history in one portable file. One writer and one
 reader at this volume is exactly what SQLite handles best, and the file can be
 inspected from the shell (`sqlite3 tourism.db …`), which keeps the project
 reproducible on any Linux machine without extra infrastructure.
+
+---
+
+## 10. Public link (Streamlit Community Cloud)
+
+The quickest way to share the dashboard is Streamlit's own free hosting. It needs
+a **public GitHub repository** and no secrets.
+
+**Deploy**
+
+1. Push this folder to a public GitHub repository.
+2. Go to <https://share.streamlit.io>, sign in with GitHub and choose **Create app**.
+3. Pick the repository and branch, set the main file to `app.py` and the Python
+   version to 3.12. Leave the secrets field empty.
+4. Press **Deploy**. The app builds from `requirements.txt` (a few minutes) and
+   gets a `https://<name>.streamlit.app` address.
+
+**Set `LIVE_MODE=ondemand`** (the one setting the cloud needs). In
+*Settings → Secrets* add:
+
+```toml
+LIVE_MODE = "ondemand"
+```
+
+With the default `LIVE_MODE=db` the dashboard only reads what `fetcher.py` stored,
+and a shared host has no long-running collector, so the live cards would stay
+empty. In `ondemand` mode the dashboard collects one round itself when the newest
+stored row is older than `LIVE_MAX_AGE_SECONDS`, and `st.cache_data` reuses that
+round for `ON_DEMAND_TTL` seconds (120 by default) so visitors share one set of
+upstream calls.
+
+**What behaves differently in the cloud**
+
+| Local / VPS | Streamlit Community Cloud |
+|---|---|
+| `fetcher.py` writes a row every 120 s | a row is collected when someone opens the page and the stored data is stale |
+| SQLite file persists for months | container disk is ephemeral: live history restarts when the app redeploys or wakes from sleep |
+| always available | sleeps after 12 h without visitors; any visitor can wake it with one click |
+| your region | hosted in the US (OpenSky rate limits are absorbed by the retry/fallback path) |
+| historical CSV + live DB | historical CSV is in the repo, the live DB is generated and git-ignored |
+
+The historical charts, KPIs, filters and the four Plotly figures are identical in
+both places, because they come from `data/clean_tourism.csv`.
+
+**If you would rather keep the real 2-minute collector**, run the whole thing on a
+small Linux VPS instead: copy the folder, `python3 -m venv .venv`, `pip install -r
+requirements.txt`, install the two systemd units (section 3) and put Caddy or
+nginx in front of port 8501 for HTTPS. Leave `LIVE_MODE=db` there; nothing else
+changes.
