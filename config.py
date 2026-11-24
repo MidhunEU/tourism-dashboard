@@ -109,6 +109,12 @@ TABLE_NAME: Final[str] = "live_signals"
 # actually running: fresh rows mean no collection is ever started.
 LIVE_MODE: Final[str] = _env_str("LIVE_MODE", "ondemand").lower()
 ON_DEMAND_TTL: Final[int] = _env_int("ON_DEMAND_TTL", FETCH_INTERVAL_SECONDS)
+# A round started by the dashboard runs in the background on a shared host. It
+# fails fast and leaves the retrying to the next refresh, so an upstream that is
+# blocked from that host costs seconds instead of a timeout plus three retries
+# for every city.
+ON_DEMAND_TIMEOUT: Final[int] = _env_int("ON_DEMAND_TIMEOUT", 5)
+ON_DEMAND_RETRIES: Final[int] = _env_int("ON_DEMAND_RETRIES", 0)
 
 # --------------------------------------------------------------------------- #
 # Cities: exactly the six required by the brief. OpenSky box = lat/lon +/- 0.5.

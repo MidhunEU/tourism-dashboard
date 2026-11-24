@@ -27,6 +27,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from types import ModuleType
 
 import pandas as pd
 import plotly.express as px
@@ -195,13 +196,14 @@ _COLLECT_STATE: dict[str, object] = {
 }
 
 
-def _collect_round() -> str | None:
+def _collect_round(fetcher: ModuleType) -> str | None:
     """Collect one round of live signals into SQLite and return an error, if any.
 
-    Runs in a worker thread, so it never touches ``st.*``.
+    Runs in a worker thread, so it never touches ``st.*``, and it is handed the
+    already-imported :mod:`fetcher` module: an ``import`` here would race with
+    Streamlit's module watcher, which evicts local modules from ``sys.modules``
+    between reruns (``KeyError: 'config'`` in the import machinery).
     """
-    import fetcher  # imported lazily: the default "db" mode never needs it
-
     try:
         fetcher.setup_logging()
     except Exception:  # logging must not stop the collection
@@ -219,11 +221,15 @@ def _collect_round() -> str | None:
             eur_rate = fetcher.last_eur_rate(conn)
 
         batch: list[tuple[object, ...]] = []
-        collected = 0
         for city in config.CITIES:
             timestamp = fetcher.utc_now()
-            signals, ok = fetcher.collect_city(session, conn, city)
-            collected += int(ok)
+            signals, _ok = fetcher.collect_city(
+                session,
+                conn,
+                city,
+                timeout=config.ON_DEMAND_TIMEOUT,
+                retries=config.ON_DEMAND_RETRIES,
+            )
             batch.append(
                 (
                     timestamp,
@@ -235,9 +241,11 @@ def _collect_round() -> str | None:
                     eur_rate,
                 )
             )
-        if not collected:
-            # Every upstream call failed: no row is written, so the pill stays
-            # OFFLINE instead of claiming fresh data made entirely of nulls.
+        # A single broken upstream (a host that cannot reach OpenSky, say) must
+        # not throw away a round that still has weather or FX for every city, so
+        # the round is stored as soon as any signal exists. Only a round made
+        # entirely of nulls is discarded, and then the pill stays OFFLINE.
+        if not any(value is not None for row in batch for value in row[2:]):
             return "every upstream API failed; no live row stored"
         fetcher.insert_rows(conn, batch)
     except Exception as exc:  # noqa: BLE001 - reported on the page, never raised
@@ -248,10 +256,10 @@ def _collect_round() -> str | None:
     return None
 
 
-def _collect_worker() -> None:
+def _collect_worker(fetcher: ModuleType) -> None:
     """Run :func:`_collect_round` and record its outcome."""
     try:
-        _COLLECT_STATE["error"] = _collect_round()
+        _COLLECT_STATE["error"] = _collect_round(fetcher)
     finally:
         with _COLLECT_LOCK:
             _COLLECT_STATE["running"] = False
@@ -264,6 +272,18 @@ def start_live_collection() -> bool:
     within ``ON_DEMAND_TTL`` seconds, so visitors share a single round of
     upstream calls instead of each page view hitting OpenSky.
     """
+    # Imported here, on the script thread: Streamlit's file watcher evicts local
+    # modules from sys.modules between reruns, and importing from the worker
+    # thread at the wrong moment fails with ``KeyError: 'config'``.
+    try:
+        import fetcher
+    except Exception as exc:  # noqa: BLE001 - reported on the page, never raised
+        with _COLLECT_LOCK:
+            _COLLECT_STATE.update(
+                running=False, error=f"cannot import the collector: {exc}"
+            )
+        return False
+
     with _COLLECT_LOCK:
         if _COLLECT_STATE["running"]:
             return False
@@ -274,7 +294,10 @@ def start_live_collection() -> bool:
             return False
         _COLLECT_STATE.update(running=True, error=None, started_at=time.monotonic())
     threading.Thread(
-        target=_collect_worker, name="live-collection", daemon=True
+        target=_collect_worker,
+        args=(fetcher,),
+        name="live-collection",
+        daemon=True,
     ).start()
     return True
 

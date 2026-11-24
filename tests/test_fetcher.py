@@ -171,6 +171,29 @@ def test_weather_without_current_key_returns_none_values() -> None:
     }
 
 
+def test_collect_city_forwards_timeout_and_retries(tmp_path, monkeypatch) -> None:
+    """The dashboard's fail-fast settings must reach both upstream calls."""
+    captured: list[dict[str, object]] = []
+
+    def fake_request_json(session, url, **kwargs):
+        captured.append(kwargs)
+        return {"states": [], "current": {}}
+
+    monkeypatch.setattr(fetcher, "request_json", fake_request_json)
+    conn = fetcher.connect(tmp_path / "forward.db")
+    try:
+        signals, ok = fetcher.collect_city(
+            FakeSession([]), conn, CITY, timeout=3, retries=0
+        )
+    finally:
+        conn.close()
+
+    assert ok is True
+    assert signals["planes_in_box"] == 0
+    assert [call["timeout"] for call in captured] == [3, 3]
+    assert [call["retries"] for call in captured] == [0, 0]
+
+
 def test_missing_states_key_skips_planes_without_crashing(tmp_path) -> None:
     conn = fetcher.connect(tmp_path / "test.db")
     handler = RecordingHandler()

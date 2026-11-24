@@ -285,8 +285,15 @@ def fetch_planes(
     city: dict[str, Any],
     *,
     log: logging.Logger | logging.LoggerAdapter | None = None,
+    timeout: int | None = None,
+    retries: int | None = None,
 ) -> int:
-    """Number of aircraft inside the city's +/-0.5 degree box."""
+    """Number of aircraft inside the city's +/-0.5 degree box.
+
+    ``timeout`` and ``retries`` override the collector defaults; the dashboard's
+    on-demand rounds pass a short timeout and no retries so a blocked upstream
+    costs seconds instead of minutes.
+    """
     lat, lon = float(city["lat"]), float(city["lon"])
     half = config.BOX_HALF_SIZE
     params = {
@@ -301,6 +308,8 @@ def fetch_planes(
         params=params,
         city=str(city["city"]),
         log=log,
+        timeout=timeout,
+        retries=retries,
     )
     return count_states(payload)
 
@@ -310,6 +319,8 @@ def fetch_weather(
     city: dict[str, Any],
     *,
     log: logging.Logger | logging.LoggerAdapter | None = None,
+    timeout: int | None = None,
+    retries: int | None = None,
 ) -> dict[str, float | int | None]:
     """Current weather for one city from Open-Meteo."""
     params = {
@@ -323,6 +334,8 @@ def fetch_weather(
         params=params,
         city=str(city["city"]),
         log=log,
+        timeout=timeout,
+        retries=retries,
     )
     return parse_current(payload)
 
@@ -453,6 +466,8 @@ def collect_city(
     city: dict[str, Any],
     *,
     log: logging.Logger | logging.LoggerAdapter | None = None,
+    timeout: int | None = None,
+    retries: int | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Collect one city's live signals.
 
@@ -467,14 +482,18 @@ def collect_city(
     ok = True
 
     try:
-        signals["planes_in_box"] = fetch_planes(session, city, log=log)
+        signals["planes_in_box"] = fetch_planes(
+            session, city, log=log, timeout=timeout, retries=retries
+        )
     except (FetcherError, ResponseValidationError, requests.RequestException) as exc:
         ok = False
         log.warning("skipping planes for this city: %s", exc)
         signals["planes_in_box"] = fallback.get("planes_in_box")
 
     try:
-        signals.update(fetch_weather(session, city, log=log))
+        signals.update(
+            fetch_weather(session, city, log=log, timeout=timeout, retries=retries)
+        )
     except (FetcherError, ResponseValidationError, requests.RequestException) as exc:
         ok = False
         log.warning("weather unavailable, reusing last values: %s", exc)

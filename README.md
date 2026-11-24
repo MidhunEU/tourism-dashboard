@@ -136,6 +136,8 @@ variables win). See `.env.example`. Key settings:
 | `STALE_MAX_AGE_SECONDS` | `1800` | STALE → OFFLINE threshold (30 min) |
 | `LIVE_MODE` | `ondemand` | `ondemand` = collect in the background when stale; `db` = only read `fetcher.py` rows |
 | `ON_DEMAND_TTL` | `120` | seconds before another background round may start |
+| `ON_DEMAND_TIMEOUT` | `5` | HTTP timeout for a round the dashboard starts |
+| `ON_DEMAND_RETRIES` | `0` | retries for a round the dashboard starts (the next refresh retries instead) |
 
 `.env` is git-ignored. No secrets or API keys are used anywhere in the project.
 
@@ -339,8 +341,9 @@ a **public GitHub repository** and no secrets.
 
 1. Push this folder to a public GitHub repository.
 2. Go to <https://share.streamlit.io>, sign in with GitHub and choose **Create app**.
-3. Pick the repository and branch, set the main file to `app.py` and the Python
-   version to 3.12. Leave the secrets field empty.
+3. Pick the repository and branch and set the main file to `app.py`. The app runs
+   on the Python version the builder gives it (current builds use 3.14 and ignore
+   the version selector). Leave the secrets field empty.
 4. Press **Deploy**. The app builds from `requirements.txt` (a few minutes) and
    gets a `https://<name>.streamlit.app` address.
 
@@ -351,7 +354,10 @@ unreachable API never delays the page: the historical dashboard renders
 immediately, the pill reads `FETCHING`, and the six city cards fill in on the next
 refresh (60 s). At most one round runs per process, and `ON_DEMAND_TTL` (120 s by
 default) must pass before another starts, so visitors share one set of upstream
-calls.
+calls. Such a round uses a 5 s timeout and no retries (`ON_DEMAND_TIMEOUT` /
+`ON_DEMAND_RETRIES`), so an upstream that the host cannot reach costs seconds and
+the pill reads `Live data unavailable right now (...)` while the historical
+dashboard stays fully usable.
 
 To pin a mode explicitly, use *Settings → Secrets* (the app copies secrets into
 the environment before `config.py` is read; the field must be valid TOML, with
