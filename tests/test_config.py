@@ -63,6 +63,10 @@ def test_defaults_when_no_env_vars_are_set(fresh_config) -> None:
     assert cfg.DASHBOARD_REFRESH_SECONDS == 60
     assert cfg.LIVE_MAX_AGE_SECONDS == 300
     assert cfg.STALE_MAX_AGE_SECONDS == 1800
+    # "ondemand" behaves like "db" when a collector is running, so it is safe as
+    # the default: the live cards fill in on a host with no background collector.
+    assert cfg.LIVE_MODE == "ondemand"
+    assert cfg.on_demand() is True
 
 
 def test_city_list_is_fixed(fresh_config) -> None:

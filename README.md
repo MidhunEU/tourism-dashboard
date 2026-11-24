@@ -28,8 +28,10 @@
 
 The **fetcher** collects one row per city every `FETCH_INTERVAL_SECONDS`
 (default 120 s). The **dashboard** re-reads SQLite every
-`DASHBOARD_REFRESH_SECONDS` (default 60 s) and never calls an upstream API
-itself, so the historical charts always render even when every API is down.
+`DASHBOARD_REFRESH_SECONDS` (default 60 s) and, when nobody else is collecting
+(that is `LIVE_MODE=ondemand`, the default), starts one background round itself.
+Rendering never waits for an upstream API, so the historical charts always appear
+even when every API is down.
 
 Dashboard contents (single page, unchanged feature set):
 
@@ -132,6 +134,8 @@ variables win). See `.env.example`. Key settings:
 | `DASHBOARD_REFRESH_SECONDS` | `60` | dashboard auto-refresh |
 | `LIVE_MAX_AGE_SECONDS` | `300` | LIVE → STALE threshold (5 min) |
 | `STALE_MAX_AGE_SECONDS` | `1800` | STALE → OFFLINE threshold (30 min) |
+| `LIVE_MODE` | `ondemand` | `ondemand` = collect in the background when stale; `db` = only read `fetcher.py` rows |
+| `ON_DEMAND_TTL` | `120` | seconds before another background round may start |
 
 `.env` is git-ignored. No secrets or API keys are used anywhere in the project.
 
@@ -239,7 +243,8 @@ The suite uses no network: every HTTP call is replaced by a fake session.
 | OpenSky 4xx other than 429 | **not** retried; error logged, city falls back | unchanged |
 | Database locked / busy | WAL mode + 10 s busy timeout; insert retried by the next loop | read is `mode=ro`, so the dashboard never blocks the writer |
 | SQLite file missing or unreadable | fetcher creates it on start | warning `Live data unavailable, showing last cached data`, historical charts still render |
-| No rows yet | first loop inserts within seconds | pill **OFFLINE**, `Live data not yet fetched, run fetcher.py` |
+| No rows yet | first loop inserts within seconds | pill **FETCHING** in `ondemand` mode and the cards appear on the next refresh; **OFFLINE** with a note to start `fetcher.py` in `db` mode |
+| Upstream unreachable from the host (blocked egress, aggressive rate limit) | logs a warning, keeps the last stored values | page still renders, pill stays **OFFLINE**, warning `Live data unavailable right now (...)` |
 | Fetcher stopped for > 5 min / > 30 min | — | pill flips to **STALE** / **OFFLINE**; last-updated time shows the gap |
 | CSV missing or corrupt | — | error message naming the file; no traceback, no blank page |
 
@@ -339,22 +344,22 @@ a **public GitHub repository** and no secrets.
 4. Press **Deploy**. The app builds from `requirements.txt` (a few minutes) and
    gets a `https://<name>.streamlit.app` address.
 
-**Set `LIVE_MODE=ondemand`** (the one setting the cloud needs). In
-*Settings → Secrets* add (the app copies secrets into the environment before `config.py` is read):
+**No secret is needed.** The default `LIVE_MODE=ondemand` makes the dashboard
+start one collection round when the newest stored row is older than
+`LIVE_MAX_AGE_SECONDS`. That round runs in a background thread, so a slow or
+unreachable API never delays the page: the historical dashboard renders
+immediately, the pill reads `FETCHING`, and the six city cards fill in on the next
+refresh (60 s). At most one round runs per process, and `ON_DEMAND_TTL` (120 s by
+default) must pass before another starts, so visitors share one set of upstream
+calls.
+
+To pin a mode explicitly, use *Settings → Secrets* (the app copies secrets into
+the environment before `config.py` is read; the field must be valid TOML, with
+quotes — a malformed field is reported on the page instead of being ignored):
 
 ```toml
-LIVE_MODE = "ondemand"
+LIVE_MODE = "db"
 ```
-
-With the default `LIVE_MODE=db` the dashboard only reads what `fetcher.py` stored,
-and a shared host has no long-running collector, so the live cards would stay
-empty. In `ondemand` mode the dashboard starts one collection round when the
-newest stored row is older than `LIVE_MAX_AGE_SECONDS`. That round runs in a
-background thread, so a slow or unreachable API never delays the page: the
-historical dashboard renders immediately, the pill reads `FETCHING`, and the six
-city cards fill in on the next refresh (60 s). At most one round runs per process,
-and `ON_DEMAND_TTL` (120 s by default) must pass before another starts, so
-visitors share one set of upstream calls.
 
 **What behaves differently in the cloud**
 
@@ -372,8 +377,8 @@ both places, because they come from `data/clean_tourism.csv`.
 **If you would rather keep the real 2-minute collector**, run the whole thing on a
 small Linux VPS instead: copy the folder, `python3 -m venv .venv`, `pip install -r
 requirements.txt`, install the two systemd units (section 3) and put Caddy or
-nginx in front of port 8501 for HTTPS. Leave `LIVE_MODE=db` there; nothing else
-changes.
+nginx in front of port 8501 for HTTPS. Set `LIVE_MODE=db` there; the collector
+already runs, so the dashboard never needs to collect on its own.
 
 ---
 

@@ -3,13 +3,13 @@
 Historical layer : data/clean_tourism.csv (World Bank, 2010-2020)
 Live layer       : tourism.db -> live_signals (written by fetcher.py)
 
-With the default ``LIVE_MODE=db`` the dashboard only reads local files and never
-calls an upstream API. With ``LIVE_MODE=ondemand`` (used on shared hosting, where
-no long-running collector exists) it starts one background round when the stored
-row is older than ``LIVE_MAX_AGE_SECONDS``, reusing :mod:`fetcher`. The collection
-never runs inside the render, so a slow or blocked upstream delays only the live
-cards, never the historical charts. Every read is guarded, so a missing database
-or a broken CSV produces a warning instead of a traceback.
+With ``LIVE_MODE=db`` the dashboard only reads local files and never calls an
+upstream API. With ``LIVE_MODE=ondemand`` (the default, and what shared hosting
+needs where no long-running collector exists) it starts one background round when
+the stored row is older than ``LIVE_MAX_AGE_SECONDS``, reusing :mod:`fetcher`. The
+collection never runs inside the render, so a slow or blocked upstream delays only
+the live cards, never the historical charts. Every read is guarded, so a missing
+database or a broken CSV produces a warning instead of a traceback.
 
 Run:
     source .venv/bin/activate
@@ -33,6 +33,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+_SECRETS_ERROR: str | None = None
+
 
 def _apply_streamlit_secrets() -> None:
     """Expose ``st.secrets`` entries as environment variables.
@@ -41,10 +43,17 @@ def _apply_streamlit_secrets() -> None:
     Secrets field rather than a shell, while :mod:`config` reads the environment.
     Bridging the two keeps ``LIVE_MODE`` and friends settable in one place without
     duplicating the settings logic.
+
+    A missing secrets file is normal (local runs, no configuration needed) and is
+    ignored. A secrets file that cannot be parsed is not: its settings are silently
+    dropped, so the reason is kept and shown on the page.
     """
+    global _SECRETS_ERROR
     try:
         secrets = dict(st.secrets)
-    except Exception:  # noqa: BLE001 - no secrets configured, use the environment
+    except Exception as exc:  # noqa: BLE001 - the page reports real failures
+        if type(exc).__name__ != "StreamlitSecretNotFoundError":
+            _SECRETS_ERROR = f"{type(exc).__name__}: {exc}"
         return
     for key, value in secrets.items():
         os.environ.setdefault(str(key).upper(), str(value))
@@ -388,6 +397,13 @@ st.markdown(
     "Historical international tourism **2010–2020** (World Bank) alongside "
     "**live travel signals** for six cities, collected every 2 minutes."
 )
+
+if _SECRETS_ERROR:
+    st.warning(
+        "The Streamlit secrets could not be read, so `LIVE_MODE` and any other "
+        'setting in the Secrets field are ignored. Use valid TOML, e.g. `LIVE_MODE = "db"`. '
+        f"({_SECRETS_ERROR})"
+    )
 
 
 @refresh_every(config.DASHBOARD_REFRESH_SECONDS)
