@@ -14,6 +14,10 @@
 </p>
 
 <p align="center">
+  <a href="https://tourismdash.streamlit.app"><img alt="Open the live dashboard" src="https://img.shields.io/badge/live%20demo-tourismdash.streamlit.app-1b7f3b"></a>
+</p>
+
+<p align="center">
   <img src="docs/screenshot.png" alt="Tourism dashboard screenshot: the full page with the KPI band, six live city cards and the four historical charts" width="900">
 </p>
 
@@ -334,8 +338,9 @@ reproducible on any Linux machine without extra infrastructure.
 
 ## 10. Public link (Streamlit Community Cloud)
 
-The quickest way to share the dashboard is Streamlit's own free hosting. It needs
-a **public GitHub repository** and no secrets.
+The live instance runs at **<https://tourismdash.streamlit.app>**. The quickest way
+to share the dashboard is Streamlit's own free hosting; it needs a **public GitHub
+repository** and no secrets.
 
 **Deploy**
 
@@ -374,7 +379,7 @@ LIVE_MODE = "db"
 | `fetcher.py` writes a row every 120 s | a row is collected when someone opens the page and the stored data is stale |
 | SQLite file persists for months | container disk is ephemeral: live history restarts when the app redeploys or wakes from sleep |
 | always available | sleeps after 12 h without visitors; any visitor can wake it with one click |
-| your region | hosted in the US (OpenSky rate limits are absorbed by the retry/fallback path) |
+| OpenSky reachable | Cloud egress cannot reach `opensky-network.org` (connect timeouts in the app log), so the cards show temperature, weather and FX while `planes_in_box` stays `n/a`; everything works when run locally |
 | historical CSV + live DB | historical CSV is in the repo, the live DB is generated and git-ignored |
 
 The historical charts, KPIs, filters and the four Plotly figures are identical in
