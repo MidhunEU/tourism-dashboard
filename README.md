@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Tourism dashboard screenshot" width="900">
+  <img src="docs/screenshot.png" alt="Tourism dashboard screenshot: the full page with the KPI band, six live city cards and the four historical charts" width="900">
 </p>
 
 ---
