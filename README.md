@@ -348,10 +348,13 @@ LIVE_MODE = "ondemand"
 
 With the default `LIVE_MODE=db` the dashboard only reads what `fetcher.py` stored,
 and a shared host has no long-running collector, so the live cards would stay
-empty. In `ondemand` mode the dashboard collects one round itself when the newest
-stored row is older than `LIVE_MAX_AGE_SECONDS`, and `st.cache_data` reuses that
-round for `ON_DEMAND_TTL` seconds (120 by default) so visitors share one set of
-upstream calls.
+empty. In `ondemand` mode the dashboard starts one collection round when the
+newest stored row is older than `LIVE_MAX_AGE_SECONDS`. That round runs in a
+background thread, so a slow or unreachable API never delays the page: the
+historical dashboard renders immediately, the pill reads `FETCHING`, and the six
+city cards fill in on the next refresh (60 s). At most one round runs per process,
+and `ON_DEMAND_TTL` (120 s by default) must pass before another starts, so
+visitors share one set of upstream calls.
 
 **What behaves differently in the cloud**
 

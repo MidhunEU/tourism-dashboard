@@ -101,9 +101,9 @@ TABLE_NAME: Final[str] = "live_signals"
 
 # How the dashboard obtains live rows:
 #   "db"       - read only what fetcher.py stored (local, systemd, VPS)
-#   "ondemand" - collect a fresh round inside the dashboard when the stored row
-#                is older than LIVE_MAX_AGE_SECONDS (shared hosting, where no
-#                long-running collector exists)
+#   "ondemand" - start one background collection when the stored row is older
+#                than LIVE_MAX_AGE_SECONDS (shared hosting, where no long-running
+#                collector exists); the page never waits for it
 LIVE_MODE: Final[str] = _env_str("LIVE_MODE", "db").lower()
 ON_DEMAND_TTL: Final[int] = _env_int("ON_DEMAND_TTL", FETCH_INTERVAL_SECONDS)
 

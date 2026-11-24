@@ -5,10 +5,11 @@ Live layer       : tourism.db -> live_signals (written by fetcher.py)
 
 With the default ``LIVE_MODE=db`` the dashboard only reads local files and never
 calls an upstream API. With ``LIVE_MODE=ondemand`` (used on shared hosting, where
-no long-running collector exists) it collects one round itself when the stored row
-is older than ``LIVE_MAX_AGE_SECONDS``, reusing :mod:`fetcher`. Every read is
-guarded, so a missing database or a broken CSV produces a warning instead of a
-traceback, and the historical charts always render.
+no long-running collector exists) it starts one background round when the stored
+row is older than ``LIVE_MAX_AGE_SECONDS``, reusing :mod:`fetcher`. The collection
+never runs inside the render, so a slow or blocked upstream delays only the live
+cards, never the historical charts. Every read is guarded, so a missing database
+or a broken CSV produces a warning instead of a traceback.
 
 Run:
     source .venv/bin/activate
@@ -20,8 +21,11 @@ Shared hosting:
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -90,7 +94,12 @@ WEATHER_CODES = {
     99: "Thunderstorm + hail",
 }
 
-STATUS_COLOURS = {"LIVE": "#1b7f3b", "STALE": "#b25e09", "OFFLINE": "#b3261e"}
+STATUS_COLOURS = {
+    "LIVE": "#1b7f3b",
+    "STALE": "#b25e09",
+    "OFFLINE": "#b3261e",
+    "FETCHING": "#1f6feb",
+}
 
 st.set_page_config(
     page_title="Tourism Data Analysis and Visualization",
@@ -163,23 +172,38 @@ def newest_live_timestamp(db_path: Path) -> pd.Timestamp | None:
     return None if pd.isna(stamp) else stamp
 
 
-@st.cache_data(ttl=config.ON_DEMAND_TTL, show_spinner=False)
-def collect_live_now() -> str | None:
-    """Collect one round of live signals inside the dashboard process.
+# Background on-demand collection ------------------------------------------- #
+# Shared hosting has no long-running collector, so the dashboard has to collect
+# a round itself. It must never do that inside the render: one unreachable
+# upstream costs a timeout plus three retries per city, which leaves the page
+# blank for minutes. Instead a single daemon thread per process does the work
+# while the page renders from whatever SQLite already holds.
+_COLLECT_LOCK = threading.Lock()
+_COLLECT_STATE: dict[str, object] = {
+    "running": False,
+    "error": None,
+    "started_at": None,
+}
 
-    Only used when ``LIVE_MODE=ondemand``. Returns ``None`` on success or a short
-    error string. The result is cached for ``ON_DEMAND_TTL`` seconds, so every
-    visitor within that window shares a single round of upstream calls instead
-    of each page view hitting OpenSky.
+
+def _collect_round() -> str | None:
+    """Collect one round of live signals into SQLite and return an error, if any.
+
+    Runs in a worker thread, so it never touches ``st.*``.
     """
     import fetcher  # imported lazily: the default "db" mode never needs it
 
     try:
+        fetcher.setup_logging()
+    except Exception:  # logging must not stop the collection
+        logging.getLogger("tourism.dashboard").warning(
+            "could not configure collector logging", exc_info=True
+        )
+
+    conn = None
+    try:
         session = fetcher.create_session()
         conn = fetcher.connect()
-    except Exception as exc:  # noqa: BLE001 - surface the reason, never crash
-        return f"{type(exc).__name__}: {exc}"
-    try:
         try:
             eur_rate = fetcher.fetch_fx(session)
         except Exception:  # noqa: BLE001 - FX is optional, reuse the stored rate
@@ -202,17 +226,48 @@ def collect_live_now() -> str | None:
                     eur_rate,
                 )
             )
-        if collected:
-            fetcher.insert_rows(conn, batch)
-        else:
+        if not collected:
             # Every upstream call failed: no row is written, so the pill stays
             # OFFLINE instead of claiming fresh data made entirely of nulls.
             return "every upstream API failed; no live row stored"
-    except Exception as exc:  # noqa: BLE001 - the caller reports it as OFFLINE
+        fetcher.insert_rows(conn, batch)
+    except Exception as exc:  # noqa: BLE001 - reported on the page, never raised
         return f"{type(exc).__name__}: {exc}"
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     return None
+
+
+def _collect_worker() -> None:
+    """Run :func:`_collect_round` and record its outcome."""
+    try:
+        _COLLECT_STATE["error"] = _collect_round()
+    finally:
+        with _COLLECT_LOCK:
+            _COLLECT_STATE["running"] = False
+
+
+def start_live_collection() -> bool:
+    """Start one background collection; return whether a new one was started.
+
+    At most one round runs per process, and a finished round is not repeated
+    within ``ON_DEMAND_TTL`` seconds, so visitors share a single round of
+    upstream calls instead of each page view hitting OpenSky.
+    """
+    with _COLLECT_LOCK:
+        if _COLLECT_STATE["running"]:
+            return False
+        last_started = _COLLECT_STATE.get("started_at")
+        if isinstance(last_started, float) and (
+            time.monotonic() - last_started < config.ON_DEMAND_TTL
+        ):
+            return False
+        _COLLECT_STATE.update(running=True, error=None, started_at=time.monotonic())
+    threading.Thread(
+        target=_collect_worker, name="live-collection", daemon=True
+    ).start()
+    return True
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -242,7 +297,11 @@ def load_live() -> tuple[pd.DataFrame, pd.Timestamp | None, str | None]:
             else (pd.Timestamp.now(tz="UTC") - newest).total_seconds()
         )
         if age is None or age > config.LIVE_MAX_AGE_SECONDS:
-            fetch_error = collect_live_now()
+            # Never collect inline: the page renders now and the rows show up on
+            # a later refresh. ``error`` still describes the previous attempt.
+            start_live_collection()
+            previous = _COLLECT_STATE.get("error")
+            fetch_error = previous if isinstance(previous, str) else None
     if not db_path.exists():
         return pd.DataFrame(), None, fetch_error
     try:
@@ -283,10 +342,17 @@ def render_status() -> None:
     """Render the LIVE / STALE / OFFLINE pill plus the last-updated time."""
     _frame, last_updated, error = live_state()
     label, colour = status_for(last_updated)
+    if last_updated is None and _COLLECT_STATE["running"]:
+        label, colour = "FETCHING", STATUS_COLOURS["FETCHING"]
     if last_updated is None:
-        detail = f"no live rows yet - start fetcher.py (refreshes every {config.DASHBOARD_REFRESH_SECONDS} s)"
+        detail = (
+            "First collection is running in the background - it appears on the next refresh"
+            if config.on_demand()
+            else f"No live rows yet - start fetcher.py (refreshes every {config.DASHBOARD_REFRESH_SECONDS} s)"
+        )
     else:
         detail = (
+            f"Live data last updated: "
             f"{last_updated.tz_convert('UTC').strftime('%Y-%m-%d %H:%M:%S')} UTC "
             f"(refreshes every {config.DASHBOARD_REFRESH_SECONDS} s)"
         )
@@ -295,12 +361,12 @@ def render_status() -> None:
         f'<span style="background:{colour};color:#fff;border-radius:999px;'
         "padding:.15rem .65rem;font-size:.78rem;font-weight:700;"
         f'letter-spacing:.05em">{label}</span>'
-        f'<span style="color:#555;font-size:.85rem">Live data last updated: {detail}</span>'
+        f'<span style="color:#555;font-size:.85rem">{detail}</span>'
         "</div>",
         unsafe_allow_html=True,
     )
     if error:
-        st.warning("Live data unavailable, showing last cached data")
+        st.warning(f"Live data unavailable right now ({error})")
 
 
 def styled(fig: go.Figure, height: int = 380) -> go.Figure:
@@ -408,12 +474,15 @@ st.divider()
 @refresh_every(config.DASHBOARD_REFRESH_SECONDS)
 def render_live() -> None:
     """Six auto-refreshing city cards, with explicit empty/error states."""
-    live, _, error = live_state()
+    live, _, _error = live_state()
     st.subheader("Live travel signals")
-    if error:
-        st.warning("Live data unavailable, showing last cached data")
     if live.empty:
-        st.warning("Live data not yet fetched, run fetcher.py")
+        st.info(
+            "The first live collection is running in the background; the six "
+            "city cards appear on the next refresh."
+            if config.on_demand()
+            else "No live rows yet - run fetcher.py to fill the six city cards."
+        )
         return
 
     rows = live.set_index("city")
@@ -423,7 +492,7 @@ def render_live() -> None:
             with col, st.container(border=True):
                 st.markdown(f"**{city}**")
                 if city not in rows.index:
-                    st.info("No live data yet, start fetcher.py")
+                    st.info("No live data yet for this city")
                     continue
                 row = rows.loc[city]
                 if isinstance(row, pd.DataFrame):
